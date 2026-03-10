@@ -36,7 +36,7 @@ Organize your RDP servers into groups, inherit credentials from parent groups, a
 
 3. **Clone this repository:**
    ```bash
-   git clone https://github.com/yourname/rdp-tree.git
+   git clone https://github.com/dbranson-exo/rdp-tree.git
    cd rdp-tree
    ```
 
