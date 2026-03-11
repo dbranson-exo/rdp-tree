@@ -9,7 +9,7 @@ APP_NAME="RDP Tree"
 DMG_NAME="RDP Tree"
 
 echo "==> Cleaning previous build..."
-rm -rf build dist 2>/dev/null || { find build dist -delete 2>/dev/null; true; }
+find build dist -delete 2>/dev/null; rm -rf build dist 2>/dev/null; true
 
 echo "==> Building .app with py2app..."
 python3 setup.py py2app 2>&1 | grep -v "^creating\|^copying\|^--- Skipping"
