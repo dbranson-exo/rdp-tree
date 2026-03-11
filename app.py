@@ -8,6 +8,7 @@ from typing import Optional
 
 import keychain
 import launch
+import prefs
 import rdg_import
 import storage
 from models import Group, Server, ServerSettings, TreeNode
@@ -55,6 +56,7 @@ class RDPTreeApp:
         self._setup_menu()
         self._setup_ui()
         self._setup_keybindings()
+        self._setup_drag_and_drop()
 
         # macOS quit handler
         try:
@@ -291,6 +293,145 @@ class RDPTreeApp:
         self._tree.bind("<Return>",   lambda e: self._connect_selected())
         self._tree.bind("<Delete>",   lambda e: self._delete_selected())
         self._tree.bind("<BackSpace>", lambda e: self._delete_selected())
+
+    # ------------------------------------------------------------------
+    # Drag and drop
+    # ------------------------------------------------------------------
+
+    def _setup_drag_and_drop(self):
+        self._drag_iid: Optional[str] = None
+        self._drag_active = False
+        self._drag_start_y = 0
+        self._drag_target_iid: Optional[str] = None
+        self._tree.tag_configure("drag_target", background="#3584e4", foreground="white")
+        self._tree.bind("<ButtonPress-1>",   self._on_drag_start)
+        self._tree.bind("<B1-Motion>",       self._on_drag_motion)
+        self._tree.bind("<ButtonRelease-1>", self._on_drag_release)
+
+    def _on_drag_start(self, event):
+        iid = self._tree.identify_row(event.y)
+        node = self._item_map.get(iid) if iid else None
+        if not iid or node is self._root_group:
+            self._drag_iid = None
+            return
+        self._drag_iid = iid
+        self._drag_start_y = event.y
+        self._drag_active = False
+        self._drag_target_iid = None
+
+    def _on_drag_motion(self, event):
+        if not self._drag_iid:
+            return
+        if not self._drag_active:
+            if abs(event.y - self._drag_start_y) < 4:
+                return
+            self._drag_active = True
+            self._tree.configure(cursor="fleur")
+
+        target_iid = self._tree.identify_row(event.y)
+        if target_iid == self._drag_target_iid:
+            return
+
+        # Clear previous highlight
+        self._clear_drag_highlight()
+
+        self._drag_target_iid = target_iid
+
+        # Highlight new target if valid
+        if (target_iid and target_iid != self._drag_iid
+                and not self._is_descendant_or_self(self._drag_iid, target_iid)):
+            tags = list(self._tree.item(target_iid, "tags"))
+            tags.append("drag_target")
+            self._tree.item(target_iid, tags=tags)
+
+    def _on_drag_release(self, event):
+        self._clear_drag_highlight()
+        self._tree.configure(cursor="")
+
+        if not self._drag_active or not self._drag_iid:
+            self._drag_iid = None
+            self._drag_active = False
+            return
+
+        target_iid = self._tree.identify_row(event.y)
+        drag_iid = self._drag_iid
+        self._drag_iid = None
+        self._drag_active = False
+
+        if not target_iid or target_iid == drag_iid:
+            return
+        if self._is_descendant_or_self(drag_iid, target_iid):
+            return
+
+        self._do_drag_drop(drag_iid, target_iid)
+
+    def _clear_drag_highlight(self):
+        if self._drag_target_iid:
+            node = self._item_map.get(self._drag_target_iid)
+            if node is not None:
+                tag = "group" if isinstance(node, Group) else "server"
+                tags = [t for t in self._tree.item(self._drag_target_iid, "tags")
+                        if t != "drag_target"]
+                if tag not in tags:
+                    tags.append(tag)
+                self._tree.item(self._drag_target_iid, tags=tags)
+            self._drag_target_iid = None
+
+    def _is_descendant_or_self(self, ancestor_iid: str, iid: str) -> bool:
+        """Return True if iid is ancestor_iid itself or one of its descendants."""
+        current = iid
+        while current:
+            if current == ancestor_iid:
+                return True
+            current = self._tree.parent(current)
+        return False
+
+    def _do_drag_drop(self, drag_iid: str, target_iid: str):
+        drag_node = self._item_map.get(drag_iid)
+        target_node = self._item_map.get(target_iid)
+        if drag_node is None or target_node is None:
+            return
+
+        # Determine new parent and insertion position
+        if isinstance(target_node, Group):
+            # Drop onto a group → append as last child
+            new_parent_iid = target_iid
+            new_parent_node = target_node
+            tree_index = "end"
+        else:
+            # Drop onto a server → insert before it in its parent
+            new_parent_iid = self._tree.parent(target_iid)
+            new_parent_node = self._item_map.get(new_parent_iid)
+            if not isinstance(new_parent_node, Group):
+                return
+            siblings = list(self._tree.get_children(new_parent_iid))
+            tree_index = siblings.index(target_iid)
+
+        # Remove drag_node from its current model parent
+        old_parent_iid = self._tree.parent(drag_iid)
+        old_parent_node = self._item_map.get(old_parent_iid)
+        if not isinstance(old_parent_node, Group):
+            return
+        old_parent_node.children = [c for c in old_parent_node.children
+                                     if c.id != drag_node.id]
+
+        # Find insertion index in the new parent's model children
+        if isinstance(target_node, Group):
+            model_index = len(new_parent_node.children)
+        else:
+            model_index = next(
+                (i for i, c in enumerate(new_parent_node.children)
+                 if c.id == target_node.id),
+                len(new_parent_node.children)
+            )
+
+        new_parent_node.children.insert(model_index, drag_node)
+
+        # Update treeview
+        self._tree.move(drag_iid, new_parent_iid, tree_index)
+        self._tree.selection_set(drag_iid)
+        self._tree.see(drag_iid)
+        self._mark_modified()
 
     # ------------------------------------------------------------------
     # Tree population
@@ -537,25 +678,15 @@ class RDPTreeApp:
 
         username, domain = self._resolve_credentials(sel[0], node)
 
-        # Try keychain first
-        password = keychain.get_password(node.id) if node.settings.has_saved_password else None
-
-        if password is None:
-            # Show credentials dialog
-            dlg = ConnectDialog(self.root, node, username, domain)
-            self.root.wait_window(dlg.dialog)
-            if not dlg.result:
-                return
-            username = dlg.result["username"]
-            domain = dlg.result["domain"]
-            password = dlg.result["password"]
-            if dlg.result.get("save_password") and password:
-                keychain.set_password(node.id, password)
-                node.settings.has_saved_password = True
-                self._mark_modified()
+        dlg = ConnectDialog(self.root, node, username, domain)
+        self.root.wait_window(dlg.dialog)
+        if not dlg.result:
+            return
+        username = dlg.result["username"]
+        domain = dlg.result["domain"]
 
         try:
-            launch.launch(node, username, domain, password or "")
+            launch.launch(node, username, domain, "")
             self._status_var.set(f"Connecting to {node.label}...")
         except Exception as exc:
             messagebox.showerror("Launch Error",
@@ -731,12 +862,9 @@ class RDPTreeApp:
         # Swap in model
         children[idx], children[new_idx] = children[new_idx], children[idx]
 
-        # Rebuild tree (simplest approach for now)
-        self._refresh_tree()
-        # Re-select
-        if node.id in self._id_map:
-            self._tree.selection_set(self._id_map[node.id])
-            self._tree.see(self._id_map[node.id])
+        # Move the treeview item directly instead of rebuilding the whole tree
+        self._tree.move(iid, parent_iid, new_idx)
+        self._tree.see(iid)
         self._mark_modified()
 
     # ------------------------------------------------------------------
@@ -785,6 +913,7 @@ class RDPTreeApp:
             self._show_welcome()
             self._update_title()
             self._status_var.set(f"Opened {Path(path).name}")
+            prefs.set_last_file(path)
         except Exception as exc:
             messagebox.showerror("Open Error", f"Could not open file:\n{exc}")
 
@@ -812,6 +941,7 @@ class RDPTreeApp:
         if not path:
             return False
         self._current_file = Path(path)
+        prefs.set_last_file(path)
         return self._save()
 
     def _import_rdg(self):
@@ -840,7 +970,6 @@ class RDPTreeApp:
                 return
             if answer:  # Merge
                 self._root_group.children.extend(imported.children)
-                self._root_group.name = imported.name
             else:  # Replace
                 self._root_group = imported
         else:
@@ -1078,7 +1207,7 @@ class ConnectDialog(_BaseDialog):
         super().__init__(parent, f"Connect to {server.label}")
 
     def _dialog_size(self):
-        return 400, 260
+        return 400, 200
 
     def _build(self):
         outer = ttk.Frame(self.dialog, padding=16)
@@ -1093,10 +1222,6 @@ class ConnectDialog(_BaseDialog):
 
         self._username = self._make_field(frame, "Username", 0)
         self._domain   = self._make_field(frame, "Domain",   1)
-        self._password = self._make_field(frame, "Password", 2, show="*")
-        self._save_pw  = tk.BooleanVar()
-        ttk.Checkbutton(frame, text="Save to Keychain", variable=self._save_pw).grid(
-            row=3, column=1, sticky=tk.W, pady=4)
 
         self._username.set(self._pre_username)
         self._domain.set(self._pre_domain)
@@ -1106,9 +1231,7 @@ class ConnectDialog(_BaseDialog):
 
     def _on_ok(self):
         self.result = {
-            "username":      self._username.get().strip(),
-            "domain":        self._domain.get().strip(),
-            "password":      self._password.get(),
-            "save_password": self._save_pw.get(),
+            "username": self._username.get().strip(),
+            "domain":   self._domain.get().strip(),
         }
         self.dialog.destroy()

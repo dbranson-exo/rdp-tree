@@ -2,21 +2,26 @@
 """RDP Tree — RDCMan-style connection manager for macOS."""
 import sys
 import tkinter as tk
+from pathlib import Path
 from app import RDPTreeApp
+import prefs
+import storage
 
 
 def main():
     root = tk.Tk()
     app = RDPTreeApp(root)
 
-    # Open a file passed as a command-line argument
+    # Determine which file to open: CLI arg takes priority, then last-used file
     if len(sys.argv) > 1:
-        path = sys.argv[1]
+        open_path = Path(sys.argv[1])
+    else:
+        open_path = prefs.get_last_file()
+
+    if open_path:
         try:
-            import storage
-            app._root_group = storage.load(path)
-            from pathlib import Path
-            app._current_file = Path(path)
+            app._root_group = storage.load(open_path)
+            app._current_file = open_path
             app._refresh_tree()
             app._update_title()
         except Exception as exc:
