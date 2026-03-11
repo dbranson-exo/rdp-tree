@@ -34,6 +34,13 @@ def build_rdp_file(server: Server, username: str, domain: str, password: str) ->
         lines.append(f"desktopwidth:i:{s.width}")
         lines.append(f"desktopheight:i:{s.height}")
 
+    # Folder sharing
+    if s.shared_folders:
+        lines.append("redirectdrives:i:1")
+        lines.append("drivestoredirect:s:" + ";".join(s.shared_folders) + ";")
+    else:
+        lines.append("redirectdrives:i:0")
+
     # General settings
     lines.append("authentication level:i:2")
     lines.append("prompt for credentials:i:0")

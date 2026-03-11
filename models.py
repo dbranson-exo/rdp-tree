@@ -16,6 +16,7 @@ class ServerSettings:
     height: int = 1080
     fullscreen: bool = False
     notes: str = ""
+    shared_folders: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -28,6 +29,7 @@ class ServerSettings:
             "height": self.height,
             "fullscreen": self.fullscreen,
             "notes": self.notes,
+            "shared_folders": self.shared_folders,
         }
 
     @classmethod
@@ -42,6 +44,7 @@ class ServerSettings:
             height=d.get("height", 1080),
             fullscreen=d.get("fullscreen", False),
             notes=d.get("notes", ""),
+            shared_folders=d.get("shared_folders", []),
         )
 
 

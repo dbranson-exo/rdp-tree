@@ -123,7 +123,8 @@ class RDPTreeApp:
 
         # Connection
         conn_menu = tk.Menu(menubar, tearoff=0)
-        conn_menu.add_command(label="Connect", command=self._connect_selected, accelerator="Return")
+        conn_menu.add_command(label="Connect",       command=self._connect_selected,       accelerator="Return")
+        conn_menu.add_command(label="Quick Connect", command=self._quick_connect_selected, accelerator="Cmd+Return")
         menubar.add_cascade(label="Connection", menu=conn_menu)
 
         self.root.config(menu=menubar)
@@ -290,7 +291,8 @@ class RDPTreeApp:
         self.root.bind("<Command-i>", lambda e: self._edit_selected())
         self.root.bind("<Command-G>", lambda e: self._add_group())
         self.root.bind("<Command-N>", lambda e: self._add_server())
-        self._tree.bind("<Return>",   lambda e: self._connect_selected())
+        self._tree.bind("<Return>",         lambda e: self._connect_selected())
+        self._tree.bind("<Command-Return>", lambda e: self._quick_connect_selected())
         self._tree.bind("<Delete>",   lambda e: self._delete_selected())
         self._tree.bind("<BackSpace>", lambda e: self._delete_selected())
 
@@ -623,7 +625,8 @@ class RDPTreeApp:
         menu = tk.Menu(self.root, tearoff=0)
 
         if isinstance(node, Server):
-            menu.add_command(label="Connect",      command=self._connect_selected)
+            menu.add_command(label="Connect",       command=self._connect_selected)
+            menu.add_command(label="Quick Connect", command=self._quick_connect_selected)
             menu.add_separator()
             menu.add_command(label="Edit...",      command=self._edit_selected)
             menu.add_command(label="Delete",       command=self._delete_selected)
@@ -688,6 +691,23 @@ class RDPTreeApp:
         try:
             launch.launch(node, username, domain, "")
             self._status_var.set(f"Connecting to {node.label}...")
+        except Exception as exc:
+            messagebox.showerror("Launch Error",
+                                 f"Failed to launch RDP session:\n{exc}")
+
+    def _quick_connect_selected(self):
+        """Launch immediately using resolved credentials — no dialog."""
+        sel = self._tree.selection()
+        if not sel:
+            return
+        node = self._item_map.get(sel[0])
+        if not isinstance(node, Server):
+            return
+
+        username, domain = self._resolve_credentials(sel[0], node)
+        try:
+            launch.launch(node, username, domain, "")
+            self._status_var.set(f"Quick connecting to {node.label}...")
         except Exception as exc:
             messagebox.showerror("Launch Error",
                                  f"Failed to launch RDP session:\n{exc}")
@@ -1045,7 +1065,7 @@ class ServerDialog(_BaseDialog):
         super().__init__(parent, title)
 
     def _dialog_size(self):
-        return 480, 480
+        return 480, 600
 
     def _build(self):
         outer = ttk.Frame(self.dialog, padding=16)
@@ -1084,6 +1104,26 @@ class ServerDialog(_BaseDialog):
         self._notes_text = tk.Text(frame, height=3, width=32, wrap=tk.WORD)
         self._notes_text.grid(row=8, column=1, sticky=tk.EW, pady=4)
 
+        # Shared Folders
+        ttk.Separator(frame, orient=tk.HORIZONTAL).grid(
+            row=9, column=0, columnspan=2, sticky=tk.EW, pady=(8, 4))
+        ttk.Label(frame, text="Shared Folders:", anchor=tk.E, width=14).grid(
+            row=10, column=0, sticky=tk.NE, padx=(0, 8), pady=4)
+
+        folder_frame = ttk.Frame(frame)
+        folder_frame.grid(row=10, column=1, sticky=tk.EW, pady=4)
+        folder_frame.columnconfigure(0, weight=1)
+
+        self._folders_listbox = tk.Listbox(folder_frame, height=4, selectmode=tk.SINGLE)
+        self._folders_listbox.grid(row=0, column=0, sticky=tk.EW)
+
+        folder_btn_frame = ttk.Frame(folder_frame)
+        folder_btn_frame.grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
+        ttk.Button(folder_btn_frame, text="Add Folder…",
+                   command=self._add_folder).pack(side=tk.LEFT)
+        ttk.Button(folder_btn_frame, text="Remove",
+                   command=self._remove_folder).pack(side=tk.LEFT, padx=(6, 0))
+
         # Pre-fill
         if self._server:
             self._display_name.set(self._server.display_name)
@@ -1098,6 +1138,8 @@ class ServerDialog(_BaseDialog):
                 if pw:
                     self._password.set(pw)
                     self._save_pw.set(True)
+            for folder in s.shared_folders:
+                self._folders_listbox.insert(tk.END, folder)
         else:
             self._port.set("3389")
             self._resolution.set("1920 x 1080")
@@ -1140,6 +1182,7 @@ class ServerDialog(_BaseDialog):
                 height=height,
                 fullscreen=fullscreen,
                 notes=self._notes_text.get("1.0", "end-1c").strip(),
+                shared_folders=list(self._folders_listbox.get(0, tk.END)),
             ),
         )
 
@@ -1154,6 +1197,17 @@ class ServerDialog(_BaseDialog):
 
         self.result = new_server
         self.dialog.destroy()
+
+
+    def _add_folder(self):
+        path = filedialog.askdirectory(title="Select Folder to Share", parent=self.dialog)
+        if path and path not in self._folders_listbox.get(0, tk.END):
+            self._folders_listbox.insert(tk.END, path)
+
+    def _remove_folder(self):
+        sel = self._folders_listbox.curselection()
+        if sel:
+            self._folders_listbox.delete(sel[0])
 
 
 class GroupDialog(_BaseDialog):

@@ -16,7 +16,8 @@
 
 ## Features
 
-- [ ] **Reconnect to open session** — right-click a server to reconnect to an already-running Microsoft Remote Desktop session (bring the existing window to the front rather than launching a new connection).
+- [x] **Local folder sharing** — allow per-server selection of local folders to share in RDP sessions via the `drivestoredirect` RDP setting; folders should be configurable in the Server dialog and persisted in the `.rdptree` file.
+- [x] **Reconnect to open session** — implemented as "Quick Connect": launches immediately using resolved credentials with no dialog (Cmd+Return / right-click menu). Windows App has no AppleScript API so focusing an existing window is not possible.
 - [ ] **Export to .rdg** — round-trip export back to RDCMan format for users who share files with Windows colleagues.
 - [ ] **Duplicate server / group** — right-click "Duplicate" for quick cloning of similar entries.
 - [ ] **Multi-select** — treeview uses `selectmode="browse"` (single select only); multi-select would enable batch delete/move.
