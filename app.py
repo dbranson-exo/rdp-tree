@@ -672,6 +672,7 @@ class RDPTreeApp:
         elif isinstance(node, Server):
             menu.add_command(label="Connect",       command=self._connect_selected)
             menu.add_command(label="Quick Connect", command=self._quick_connect_selected)
+            menu.add_command(label="Connect As...", command=self._connect_as_selected)
             menu.add_separator()
             menu.add_command(label="Copy Address",  command=self._copy_address_selected)
             menu.add_separator()
@@ -777,6 +778,31 @@ class RDPTreeApp:
         if launched:
             self._status_var.set(
                 f"Quick connecting to {launched} server{'s' if launched != 1 else ''}...")
+
+    def _connect_as_selected(self):
+        """Open connect dialog with blank credentials to connect as a different user."""
+        sel = self._tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        node = self._item_map.get(iid)
+        if not isinstance(node, Server):
+            return
+
+        dlg = ConnectDialog(self.root, node, "", "",
+                            title=f"Connect As — {node.label}")
+        self.root.wait_window(dlg.dialog)
+        if not dlg.result:
+            return
+        username = dlg.result["username"]
+        domain = dlg.result["domain"]
+        try:
+            launch.launch(node, username, domain, "")
+            label = f"{domain}\\{username}" if domain else username
+            self._status_var.set(f"Connecting to {node.label} as {label}...")
+        except Exception as exc:
+            messagebox.showerror("Launch Error",
+                                 f"Failed to launch RDP session:\n{exc}")
 
     # ------------------------------------------------------------------
     # Add / Edit / Delete
@@ -1196,6 +1222,9 @@ class RDPTreeApp:
             messagebox.showerror("Export Error", f"Could not export RDG file:\n{exc}")
 
     def _quit(self):
+        if self._search_after_id is not None:
+            self.root.after_cancel(self._search_after_id)
+            self._search_after_id = None
         if self._confirm_discard():
             self.root.destroy()
 
@@ -1384,8 +1413,15 @@ class ServerDialog(_BaseDialog):
         # Handle password
         pw = self._password.get()
         if self._save_pw.get() and pw:
-            keychain.set_password(new_server.id, pw)
-            new_server.settings.has_saved_password = True
+            if keychain.set_password(new_server.id, pw):
+                new_server.settings.has_saved_password = True
+            else:
+                messagebox.showwarning(
+                    "Keychain Error",
+                    "The password could not be saved to the macOS Keychain.\n"
+                    "You will be prompted for it at connect time.",
+                    parent=self.dialog,
+                )
         elif not self._save_pw.get() and self._server and self._server.settings.has_saved_password:
             keychain.delete_password(new_server.id)
             new_server.settings.has_saved_password = False
@@ -1449,11 +1485,12 @@ class GroupDialog(_BaseDialog):
 
 
 class ConnectDialog(_BaseDialog):
-    def __init__(self, parent: tk.Tk, server: Server, username: str, domain: str):
+    def __init__(self, parent: tk.Tk, server: Server, username: str, domain: str,
+                 title: str = ""):
         self._server = server
         self._pre_username = username
         self._pre_domain = domain
-        super().__init__(parent, f"Connect to {server.label}")
+        super().__init__(parent, title or f"Connect to {server.label}")
 
     def _dialog_size(self):
         return 400, 200
