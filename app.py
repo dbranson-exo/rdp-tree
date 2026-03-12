@@ -1,5 +1,6 @@
 """Main application window for RDP Tree."""
 from __future__ import annotations
+import subprocess
 import tkinter as tk
 import uuid
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -9,6 +10,7 @@ from typing import Optional
 import keychain
 import launch
 import prefs
+import rdg_export
 import rdg_import
 import storage
 from models import Group, Server, ServerSettings, TreeNode
@@ -51,6 +53,8 @@ class RDPTreeApp:
         self._item_map: dict[str, TreeNode] = {}
         # Maps model ID -> treeview IID
         self._id_map: dict[str, str] = {}
+        # Pending after() ID for debounced search
+        self._search_after_id: Optional[str] = None
 
         self._setup_icons()
         self._setup_menu()
@@ -103,10 +107,16 @@ class RDPTreeApp:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="New",         command=self._new,        accelerator="Cmd+N")
         file_menu.add_command(label="Open...",     command=self._open,       accelerator="Cmd+O")
+        self._open_recent_menu = tk.Menu(file_menu, tearoff=0,
+                                         postcommand=self._rebuild_recent_menu)
+        file_menu.add_cascade(label="Open Recent", menu=self._open_recent_menu)
         file_menu.add_command(label="Save",        command=self._save,       accelerator="Cmd+S")
         file_menu.add_command(label="Save As...",  command=self._save_as)
         file_menu.add_separator()
+        file_menu.add_command(label="Reveal in Finder", command=self._reveal_in_finder)
+        file_menu.add_separator()
         file_menu.add_command(label="Import RDG...", command=self._import_rdg)
+        file_menu.add_command(label="Export RDG...", command=self._export_rdg)
         menubar.add_cascade(label="File", menu=file_menu)
 
         # Edit
@@ -158,7 +168,7 @@ class RDPTreeApp:
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
-        self._tree = ttk.Treeview(tree_frame, selectmode="browse", show="tree")
+        self._tree = ttk.Treeview(tree_frame, selectmode="extended", show="tree")
         vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=vsb.set)
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -463,22 +473,11 @@ class RDPTreeApp:
         if not ft:
             self._tree.item(root_iid, open=self._root_group.expanded)
 
-    def _populate_children(self, parent_iid: str, group: Group, filter_text: str):
+    def _populate_children(self, parent_iid: str, group: Group, filter_text: str) -> bool:
+        """Insert matching children under parent_iid. Returns True if any item was inserted."""
+        any_inserted = False
         for child in group.children:
-            if isinstance(child, Group):
-                if filter_text and not self._group_matches(child, filter_text):
-                    continue
-                iid = self._tree.insert(
-                    parent_iid, "end",
-                    text=child.name,
-                    image=self._icon_group_closed,
-                    tags=("group",),
-                    open=child.expanded if not filter_text else True,
-                )
-                self._item_map[iid] = child
-                self._id_map[child.id] = iid
-                self._populate_children(iid, child, filter_text)
-            elif isinstance(child, Server):
+            if isinstance(child, Server):
                 if filter_text and filter_text not in child.label.lower() \
                         and filter_text not in child.settings.host.lower():
                     continue
@@ -490,18 +489,39 @@ class RDPTreeApp:
                 )
                 self._item_map[iid] = child
                 self._id_map[child.id] = iid
-
-    def _group_matches(self, group: Group, ft: str) -> bool:
-        if ft in group.name.lower():
-            return True
-        for child in group.children:
-            if isinstance(child, Server):
-                if ft in child.label.lower() or ft in child.settings.host.lower():
-                    return True
+                any_inserted = True
             elif isinstance(child, Group):
-                if self._group_matches(child, ft):
-                    return True
-        return False
+                if filter_text:
+                    # Tentatively insert the group, then remove it if nothing matches.
+                    iid = self._tree.insert(
+                        parent_iid, "end",
+                        text=child.name,
+                        image=self._icon_group_closed,
+                        tags=("group",),
+                        open=True,
+                    )
+                    self._item_map[iid] = child
+                    self._id_map[child.id] = iid
+                    name_matches = filter_text in child.name.lower()
+                    child_inserted = self._populate_children(iid, child, filter_text)
+                    if name_matches or child_inserted:
+                        any_inserted = True
+                    else:
+                        self._tree.delete(iid)
+                        del self._item_map[iid]
+                        del self._id_map[child.id]
+                else:
+                    iid = self._tree.insert(
+                        parent_iid, "end",
+                        text=child.name,
+                        image=self._icon_group_closed,
+                        tags=("group",),
+                        open=child.expanded,
+                    )
+                    self._item_map[iid] = child
+                    self._id_map[child.id] = iid
+                    self._populate_children(iid, child, filter_text)
+        return any_inserted
 
     def _update_title(self):
         name = self._current_file.name if self._current_file else "Untitled"
@@ -531,7 +551,11 @@ class RDPTreeApp:
     def _on_search_changed(self, *_):
         if self._search_placeholder:
             return
-        self._refresh_tree(filter_text=self._search_var.get())
+        if self._search_after_id is not None:
+            self.root.after_cancel(self._search_after_id)
+        self._search_after_id = self.root.after(
+            200, lambda: self._refresh_tree(filter_text=self._search_var.get())
+        )
 
     # ------------------------------------------------------------------
     # Selection and display
@@ -540,6 +564,9 @@ class RDPTreeApp:
     def _on_tree_select(self, _event=None):
         sel = self._tree.selection()
         if not sel:
+            return
+        if len(sel) > 1:
+            self._show_multi_select(len(sel))
             return
         iid = sel[0]
         node = self._item_map.get(iid)
@@ -553,6 +580,13 @@ class RDPTreeApp:
     def _show_welcome(self):
         self._server_frame.pack_forget()
         self._group_frame.pack_forget()
+        self._welcome_label.configure(text="Select a server or group from the tree.")
+        self._welcome_label.pack(expand=True)
+
+    def _show_multi_select(self, count: int):
+        self._server_frame.pack_forget()
+        self._group_frame.pack_forget()
+        self._welcome_label.configure(text=f"{count} items selected")
         self._welcome_label.pack(expand=True)
 
     def _show_server(self, server: Server, iid: str):
@@ -619,16 +653,30 @@ class RDPTreeApp:
     def _on_right_click(self, event):
         iid = self._tree.identify_row(event.y)
         if iid:
-            self._tree.selection_set(iid)
+            if iid not in self._tree.selection():
+                self._tree.selection_set(iid)
+        else:
+            self._tree.selection_set()
 
+        sel = self._tree.selection()
         node = self._item_map.get(iid) if iid else None
         menu = tk.Menu(self.root, tearoff=0)
 
-        if isinstance(node, Server):
+        if len(sel) > 1:
+            all_servers = all(isinstance(self._item_map.get(s), Server) for s in sel)
+            if all_servers:
+                menu.add_command(label="Connect All",       command=self._connect_selected)
+                menu.add_command(label="Quick Connect All", command=self._quick_connect_selected)
+                menu.add_separator()
+            menu.add_command(label=f"Delete {len(sel)} Items", command=self._delete_selected)
+        elif isinstance(node, Server):
             menu.add_command(label="Connect",       command=self._connect_selected)
             menu.add_command(label="Quick Connect", command=self._quick_connect_selected)
             menu.add_separator()
+            menu.add_command(label="Copy Address",  command=self._copy_address_selected)
+            menu.add_separator()
             menu.add_command(label="Edit...",      command=self._edit_selected)
+            menu.add_command(label="Duplicate",    command=self._duplicate_selected)
             menu.add_command(label="Delete",       command=self._delete_selected)
             menu.add_separator()
             menu.add_command(label="Move Up",      command=lambda: self._move_selected(-1))
@@ -650,22 +698,20 @@ class RDPTreeApp:
         menu.tk_popup(event.x_root, event.y_root)
 
     def _on_tree_open(self, _event=None):
-        sel = self._tree.selection()
-        if sel:
-            node = self._item_map.get(sel[0])
-            if isinstance(node, Group):
-                node.expanded = True
-                self._tree.item(sel[0], image=self._icon_group_open)
-                self._mark_modified()
+        iid = self._tree.focus()
+        node = self._item_map.get(iid)
+        if isinstance(node, Group):
+            node.expanded = True
+            self._tree.item(iid, image=self._icon_group_open)
+            self._mark_modified()
 
     def _on_tree_close(self, _event=None):
-        sel = self._tree.selection()
-        if sel:
-            node = self._item_map.get(sel[0])
-            if isinstance(node, Group):
-                node.expanded = False
-                self._tree.item(sel[0], image=self._icon_group_closed)
-                self._mark_modified()
+        iid = self._tree.focus()
+        node = self._item_map.get(iid)
+        if isinstance(node, Group):
+            node.expanded = False
+            self._tree.item(iid, image=self._icon_group_closed)
+            self._mark_modified()
 
     # ------------------------------------------------------------------
     # Connect
@@ -675,42 +721,62 @@ class RDPTreeApp:
         sel = self._tree.selection()
         if not sel:
             return
-        node = self._item_map.get(sel[0])
-        if not isinstance(node, Server):
+        servers = [(s, self._item_map[s]) for s in sel
+                   if isinstance(self._item_map.get(s), Server)]
+        if not servers:
             return
 
-        username, domain = self._resolve_credentials(sel[0], node)
-
-        dlg = ConnectDialog(self.root, node, username, domain)
-        self.root.wait_window(dlg.dialog)
-        if not dlg.result:
-            return
-        username = dlg.result["username"]
-        domain = dlg.result["domain"]
-
-        try:
-            launch.launch(node, username, domain, "")
-            self._status_var.set(f"Connecting to {node.label}...")
-        except Exception as exc:
-            messagebox.showerror("Launch Error",
-                                 f"Failed to launch RDP session:\n{exc}")
+        if len(servers) == 1:
+            iid, node = servers[0]
+            username, domain = self._resolve_credentials(iid, node)
+            dlg = ConnectDialog(self.root, node, username, domain)
+            self.root.wait_window(dlg.dialog)
+            if not dlg.result:
+                return
+            username = dlg.result["username"]
+            domain = dlg.result["domain"]
+            try:
+                launch.launch(node, username, domain, "")
+                self._status_var.set(f"Connecting to {node.label}...")
+            except Exception as exc:
+                messagebox.showerror("Launch Error",
+                                     f"Failed to launch RDP session:\n{exc}")
+        else:
+            launched = 0
+            for iid, node in servers:
+                username, domain = self._resolve_credentials(iid, node)
+                try:
+                    launch.launch(node, username, domain, "")
+                    launched += 1
+                except Exception as exc:
+                    messagebox.showerror("Launch Error",
+                                         f"Failed to launch {node.label}:\n{exc}")
+            if launched:
+                self._status_var.set(
+                    f"Connecting to {launched} server{'s' if launched != 1 else ''}...")
 
     def _quick_connect_selected(self):
         """Launch immediately using resolved credentials — no dialog."""
         sel = self._tree.selection()
         if not sel:
             return
-        node = self._item_map.get(sel[0])
-        if not isinstance(node, Server):
+        servers = [(s, self._item_map[s]) for s in sel
+                   if isinstance(self._item_map.get(s), Server)]
+        if not servers:
             return
 
-        username, domain = self._resolve_credentials(sel[0], node)
-        try:
-            launch.launch(node, username, domain, "")
-            self._status_var.set(f"Quick connecting to {node.label}...")
-        except Exception as exc:
-            messagebox.showerror("Launch Error",
-                                 f"Failed to launch RDP session:\n{exc}")
+        launched = 0
+        for iid, node in servers:
+            username, domain = self._resolve_credentials(iid, node)
+            try:
+                launch.launch(node, username, domain, "")
+                launched += 1
+            except Exception as exc:
+                messagebox.showerror("Launch Error",
+                                     f"Failed to launch {node.label}:\n{exc}")
+        if launched:
+            self._status_var.set(
+                f"Quick connecting to {launched} server{'s' if launched != 1 else ''}...")
 
     # ------------------------------------------------------------------
     # Add / Edit / Delete
@@ -753,6 +819,53 @@ class RDPTreeApp:
         self._id_map[server.id] = iid
         self._tree.see(iid)
         self._tree.selection_set(iid)
+        self._mark_modified()
+
+    def _duplicate_selected(self):
+        sel = self._tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        node = self._item_map.get(iid)
+        if not isinstance(node, Server):
+            return
+
+        new_settings = ServerSettings(
+            host=node.settings.host,
+            port=node.settings.port,
+            username=node.settings.username,
+            domain=node.settings.domain,
+            has_saved_password=False,
+            width=node.settings.width,
+            height=node.settings.height,
+            fullscreen=node.settings.fullscreen,
+            notes=node.settings.notes,
+            shared_folders=list(node.settings.shared_folders),
+        )
+        new_server = Server(
+            display_name=f"Copy of {node.label}",
+            settings=new_settings,
+        )
+
+        parent_iid = self._tree.parent(iid)
+        parent_group = self._item_map.get(parent_iid)
+        if not isinstance(parent_group, Group):
+            return
+
+        orig_index = parent_group.children.index(node)
+        parent_group.children.insert(orig_index + 1, new_server)
+
+        tree_index = self._tree.index(iid)
+        new_iid = self._tree.insert(
+            parent_iid, tree_index + 1,
+            text=new_server.label,
+            image=self._icon_server,
+            tags=("server",),
+        )
+        self._item_map[new_iid] = new_server
+        self._id_map[new_server.id] = new_iid
+        self._tree.see(new_iid)
+        self._tree.selection_set(new_iid)
         self._mark_modified()
 
     def _add_group(self):
@@ -824,28 +937,46 @@ class RDPTreeApp:
         sel = self._tree.selection()
         if not sel:
             return
-        iid = sel[0]
-        node = self._item_map.get(iid)
-        if node is self._root_group:
+
+        iids = [iid for iid in sel
+                if self._item_map.get(iid) is not self._root_group]
+        if not iids:
             return
 
-        label = node.label if isinstance(node, Server) else node.name
-        if not messagebox.askyesno("Delete", f"Delete '{label}'?", parent=self.root):
+        if len(iids) == 1:
+            node = self._item_map.get(iids[0])
+            if isinstance(node, Server):
+                prompt = f"Delete '{node.label}'?"
+            else:
+                count = node.server_count()
+                if count > 0:
+                    prompt = (f"Delete '{node.name}' and its "
+                              f"{count} server{'s' if count != 1 else ''}?")
+                else:
+                    prompt = f"Delete '{node.name}'?"
+        else:
+            prompt = f"Delete {len(iids)} items?"
+
+        if not messagebox.askyesno("Delete", prompt, parent=self.root):
             return
 
-        # Remove from parent model
-        parent_iid = self._tree.parent(iid)
-        parent_node = self._item_map.get(parent_iid)
-        if isinstance(parent_node, Group):
-            parent_node.children = [c for c in parent_node.children if c.id != node.id]
+        for iid in iids:
+            if iid not in self._item_map:
+                continue  # already removed as a descendant of a prior deletion
+            node = self._item_map[iid]
 
-        # Clean keychain if server had saved password
-        if isinstance(node, Server) and node.settings.has_saved_password:
-            keychain.delete_password(node.id)
+            parent_iid = self._tree.parent(iid)
+            parent_node = self._item_map.get(parent_iid)
+            if isinstance(parent_node, Group):
+                parent_node.children = [c for c in parent_node.children
+                                        if c.id != node.id]
 
-        # Remove from tree and maps
-        self._remove_from_maps(iid)
-        self._tree.delete(iid)
+            if isinstance(node, Server) and node.settings.has_saved_password:
+                keychain.delete_password(node.id)
+
+            self._remove_from_maps(iid)
+            self._tree.delete(iid)
+
         self._show_welcome()
         self._mark_modified()
 
@@ -925,14 +1056,17 @@ class RDPTreeApp:
         )
         if not path:
             return
+        self._open_file(Path(path))
+
+    def _open_file(self, path: Path):
         try:
-            self._root_group = storage.load(path)
-            self._current_file = Path(path)
+            self._root_group = storage.load(str(path))
+            self._current_file = path
             self._modified = False
             self._refresh_tree()
             self._show_welcome()
             self._update_title()
-            self._status_var.set(f"Opened {Path(path).name}")
+            self._status_var.set(f"Opened {path.name}")
             prefs.set_last_file(path)
         except Exception as exc:
             messagebox.showerror("Open Error", f"Could not open file:\n{exc}")
@@ -963,6 +1097,47 @@ class RDPTreeApp:
         self._current_file = Path(path)
         prefs.set_last_file(path)
         return self._save()
+
+    def _rebuild_recent_menu(self):
+        self._open_recent_menu.delete(0, "end")
+        recents = prefs.get_recent_files()
+        if recents:
+            for path in recents:
+                self._open_recent_menu.add_command(
+                    label=str(path),
+                    command=lambda p=path: self._open_recent(p),
+                )
+            self._open_recent_menu.add_separator()
+            self._open_recent_menu.add_command(label="Clear Menu",
+                                               command=self._clear_recent_files)
+        else:
+            self._open_recent_menu.add_command(label="No Recent Files",
+                                               state="disabled")
+
+    def _open_recent(self, path: Path):
+        if not self._confirm_discard():
+            return
+        self._open_file(path)
+
+    def _clear_recent_files(self):
+        prefs.clear_recent_files()
+
+    def _reveal_in_finder(self):
+        if self._current_file is None:
+            self._status_var.set("No file is currently open.")
+            return
+        subprocess.run(["open", "-R", str(self._current_file)], check=False)
+
+    def _copy_address_selected(self):
+        sel = self._tree.selection()
+        if not sel:
+            return
+        node = self._item_map.get(sel[0])
+        if not isinstance(node, Server):
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(node.settings.host)
+        self._status_var.set(f'Copied "{node.settings.host}" to clipboard')
 
     def _import_rdg(self):
         path = filedialog.askopenfilename(
@@ -999,6 +1174,26 @@ class RDPTreeApp:
         self._mark_modified()
         count = imported.server_count()
         self._status_var.set(f"Imported {count} servers from {Path(path).name}")
+
+    def _export_rdg(self):
+        default_name = (
+            self._current_file.stem if self._current_file else self._root_group.name
+        )
+        path = filedialog.asksaveasfilename(
+            title="Export to RDCMan File",
+            filetypes=[("RDCMan files", "*.rdg"), ("All files", "*.*")],
+            defaultextension=".rdg",
+            initialfile=f"{default_name}.rdg",
+            parent=self.root,
+        )
+        if not path:
+            return
+        try:
+            rdg_export.export_rdg(self._root_group, path)
+            count = self._root_group.server_count()
+            self._status_var.set(f"Exported {count} servers to {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Export Error", f"Could not export RDG file:\n{exc}")
 
     def _quit(self):
         if self._confirm_discard():
