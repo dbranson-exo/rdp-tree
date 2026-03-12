@@ -1,5 +1,7 @@
 """User preferences for RDP Tree."""
 import json
+import os
+import tempfile
 from pathlib import Path
 
 _PREFS_PATH = Path.home() / "Library" / "Preferences" / "rdptree.json"
@@ -16,8 +18,17 @@ def _load() -> dict:
 
 def _save(data: dict) -> None:
     _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(_PREFS_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    fd, tmp_path = tempfile.mkstemp(dir=_PREFS_PATH.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, _PREFS_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_last_file() -> Path | None:
