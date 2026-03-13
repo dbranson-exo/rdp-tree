@@ -2,10 +2,64 @@
 import os
 import subprocess
 import tempfile
+import threading
+from pathlib import Path
 from models import Server
 
+_WINDOWS_APP_CLI = "/Applications/Windows App.app/Contents/MacOS/Windows App"
 
-def build_rdp_file(server: Server, username: str, domain: str, password: str) -> str:
+
+def _windows_app_available() -> bool:
+    """Check if the Windows App CLI is available."""
+    return Path(_WINDOWS_APP_CLI).is_file()
+
+
+def _sync_bookmark(server: Server, username: str, domain: str,
+                   password: str) -> None:
+    """Pre-store credentials in Windows App via its CLI.
+
+    Creates or updates a bookmark so that Windows App has the password
+    in its internal keychain before the .rdp file is opened.  Best-effort;
+    failures are silently ignored and the .rdp launch proceeds as usual.
+    """
+    host = server.settings.host
+    port = server.settings.port
+    s = server.settings
+
+    cmd = [
+        _WINDOWS_APP_CLI, "--script", "bookmark", "write", server.id,
+        "--hostname", f"{host}:{port}" if port != 3389 else host,
+        "--friendlyname", server.label,
+        "--group", "RDP Tree",
+    ]
+
+    full_username = f"{domain}\\{username}" if domain else username
+    if full_username:
+        cmd.extend(["--username", full_username])
+    if password:
+        cmd.extend(["--password", password])
+
+    # Display
+    if s.fullscreen:
+        cmd.extend(["--fullscreen", "true"])
+    else:
+        cmd.extend(["--fullscreen", "false",
+                     "--resolution", f"{s.width} {s.height}"])
+
+    # Clipboard
+    cmd.extend(["--redirectclipboard", "1"])
+
+    # Folder sharing
+    if s.shared_folders:
+        cmd.extend(["--redirectfolders", "true"])
+
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def build_rdp_file(server: Server, username: str, domain: str) -> str:
     """Generate the contents of a .rdp file for the given server and credentials."""
     lines = []
 
@@ -19,11 +73,6 @@ def build_rdp_file(server: Server, username: str, domain: str, password: str) ->
         lines.append(f"username:s:{domain}\\{username}")
     elif username:
         lines.append(f"username:s:{username}")
-
-    if password:
-        # Note: storing plaintext password in the temp .rdp file.
-        # The file is deleted after launching.
-        lines.append(f"password 51:b:{_encode_rdp_password(password)}")
 
     # Display
     s = server.settings
@@ -55,12 +104,30 @@ def build_rdp_file(server: Server, username: str, domain: str, password: str) ->
     return "\n".join(lines) + "\n"
 
 
+def _cleanup_rdp_file(path: str) -> None:
+    """Delete the temp .rdp file after a short delay."""
+    import time
+    time.sleep(5)
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def launch(server: Server, username: str, domain: str, password: str) -> None:
     """
     Write a temporary .rdp file and open it with Microsoft Remote Desktop.
-    The temp file is cleaned up after a short delay via a background process.
+
+    If the Windows App CLI is available and a password is provided, a
+    bookmark is created/updated first so that credentials are pre-stored
+    in the app's internal keychain.  The temp file is cleaned up after a
+    short delay via a background thread.
     """
-    rdp_content = build_rdp_file(server, username, domain, password)
+    # Pre-store credentials in Windows App when possible
+    if password and _windows_app_available():
+        _sync_bookmark(server, username, domain, password)
+
+    rdp_content = build_rdp_file(server, username, domain)
 
     # Write to a named temp file (must persist until the RD app opens it)
     fd, rdp_path = tempfile.mkstemp(suffix=".rdp", prefix="rdptree_")
@@ -68,25 +135,12 @@ def launch(server: Server, username: str, domain: str, password: str) -> None:
         with os.fdopen(fd, "w") as f:
             f.write(rdp_content)
         subprocess.Popen(["open", rdp_path])
-        # Schedule deletion after 5 seconds via a background shell
-        subprocess.Popen(
-            f"sleep 5 && rm -f {rdp_path!r}",
-            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        # Schedule deletion after 5 seconds via a background thread
+        threading.Thread(target=_cleanup_rdp_file, args=(rdp_path,),
+                         daemon=True).start()
     except Exception:
         try:
             os.unlink(rdp_path)
         except OSError:
             pass
         raise
-
-
-def _encode_rdp_password(password: str) -> str:
-    """
-    RDP password encoding (password 51:b:) is Windows DPAPI-encrypted and
-    cannot be generated on macOS. We return an empty string; Microsoft Remote
-    Desktop will prompt for credentials if needed.
-    """
-    # DPAPI is Windows-only. The RD app on macOS handles auth its own way.
-    # Returning empty causes the RD app to ask for the password.
-    return ""
