@@ -638,6 +638,13 @@ class RDPTreeApp:
 
         return username, domain
 
+    @staticmethod
+    def _get_password(server: Server) -> str:
+        """Retrieve the saved password from Keychain, or return empty string."""
+        if server.settings.has_saved_password:
+            return keychain.get_password(server.id) or ""
+        return ""
+
     # ------------------------------------------------------------------
     # Tree events
     # ------------------------------------------------------------------
@@ -737,7 +744,7 @@ class RDPTreeApp:
             username = dlg.result["username"]
             domain = dlg.result["domain"]
             try:
-                launch.launch(node, username, domain, "")
+                launch.launch(node, username, domain, self._get_password(node))
                 self._status_var.set(f"Connecting to {node.label}...")
             except Exception as exc:
                 messagebox.showerror("Launch Error",
@@ -747,7 +754,8 @@ class RDPTreeApp:
             for iid, node in servers:
                 username, domain = self._resolve_credentials(iid, node)
                 try:
-                    launch.launch(node, username, domain, "")
+                    launch.launch(node, username, domain,
+                                  self._get_password(node))
                     launched += 1
                 except Exception as exc:
                     messagebox.showerror("Launch Error",
@@ -770,7 +778,8 @@ class RDPTreeApp:
         for iid, node in servers:
             username, domain = self._resolve_credentials(iid, node)
             try:
-                launch.launch(node, username, domain, "")
+                launch.launch(node, username, domain,
+                              self._get_password(node))
                 launched += 1
             except Exception as exc:
                 messagebox.showerror("Launch Error",
@@ -797,7 +806,7 @@ class RDPTreeApp:
         username = dlg.result["username"]
         domain = dlg.result["domain"]
         try:
-            launch.launch(node, username, domain, "")
+            launch.launch(node, username, domain, self._get_password(node))
             label = f"{domain}\\{username}" if domain else username
             self._status_var.set(f"Connecting to {node.label} as {label}...")
         except Exception as exc:

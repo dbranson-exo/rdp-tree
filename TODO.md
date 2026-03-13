@@ -3,7 +3,7 @@
 ## Bugs / Quirks
 
 - [x] **Import RDG merge renames root group** — `_import_rdg` sets `self._root_group.name = imported.name` even when merging (not replacing). The root group name should only change on a full replace.
-- [x] **Saved keychain passwords don't pre-fill RDP sessions** — `_encode_rdp_password` returns `""` (DPAPI is Windows-only). The password is retrieved from keychain and passed to `launch.launch()`, but is then silently dropped. Microsoft Remote Desktop will still prompt. Consider whether the save-password UI should be hidden or the limitation surfaced to the user.
+- [x] **Saved keychain passwords don't pre-fill RDP sessions** — resolved by using the Windows App CLI (`--script bookmark write --password`) to pre-store credentials as bookmarks before launching. Passwords are retrieved from macOS Keychain at connect time and synced to Windows App's internal credential store.
 
 ## UX Improvements
 
