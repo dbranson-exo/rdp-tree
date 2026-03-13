@@ -277,7 +277,7 @@ class RDPTreeApp:
         ggrid = ttk.Frame(self._group_frame)
         ggrid.pack(fill=tk.X)
         self._group_labels: dict[str, tk.StringVar] = {}
-        for i, key in enumerate(["Default Username", "Default Domain"]):
+        for i, key in enumerate(["Default Username", "Default Domain", "Default Password"]):
             ttk.Label(ggrid, text=key + ":", foreground="gray",
                       width=16, anchor=tk.E).grid(row=i, column=0, sticky=tk.E, pady=2)
             var = tk.StringVar()
@@ -615,6 +615,8 @@ class RDPTreeApp:
         self._group_info_var.set(f"{count} server{'s' if count != 1 else ''}")
         self._group_labels["Default Username"].set(group.default_username or "(none)")
         self._group_labels["Default Domain"].set(group.default_domain or "(none)")
+        self._group_labels["Default Password"].set(
+            "Saved to Keychain" if group.has_saved_password else "(none)")
 
     def _resolve_credentials(self, iid: str, server: Server) -> tuple[str, str]:
         """Return (username, domain) for a server, walking up parent groups."""
@@ -638,11 +640,23 @@ class RDPTreeApp:
 
         return username, domain
 
-    @staticmethod
-    def _get_password(server: Server) -> str:
-        """Retrieve the saved password from Keychain, or return empty string."""
+    def _get_password(self, iid: str, server: Server) -> str:
+        """Retrieve saved password from Keychain, walking up parent groups."""
         if server.settings.has_saved_password:
-            return keychain.get_password(server.id) or ""
+            pw = keychain.get_password(server.id)
+            if pw:
+                return pw
+
+        # Walk up parent groups for an inherited password
+        parent_iid = self._tree.parent(iid)
+        while parent_iid:
+            parent_node = self._item_map.get(parent_iid)
+            if isinstance(parent_node, Group) and parent_node.has_saved_password:
+                pw = keychain.get_password(parent_node.id)
+                if pw:
+                    return pw
+            parent_iid = self._tree.parent(parent_iid)
+
         return ""
 
     # ------------------------------------------------------------------
@@ -744,7 +758,7 @@ class RDPTreeApp:
             username = dlg.result["username"]
             domain = dlg.result["domain"]
             try:
-                launch.launch(node, username, domain, self._get_password(node))
+                launch.launch(node, username, domain, self._get_password(iid, node))
                 self._status_var.set(f"Connecting to {node.label}...")
             except Exception as exc:
                 messagebox.showerror("Launch Error",
@@ -755,7 +769,7 @@ class RDPTreeApp:
                 username, domain = self._resolve_credentials(iid, node)
                 try:
                     launch.launch(node, username, domain,
-                                  self._get_password(node))
+                                  self._get_password(iid, node))
                     launched += 1
                 except Exception as exc:
                     messagebox.showerror("Launch Error",
@@ -779,7 +793,7 @@ class RDPTreeApp:
             username, domain = self._resolve_credentials(iid, node)
             try:
                 launch.launch(node, username, domain,
-                              self._get_password(node))
+                              self._get_password(iid, node))
                 launched += 1
             except Exception as exc:
                 messagebox.showerror("Launch Error",
@@ -806,7 +820,7 @@ class RDPTreeApp:
         username = dlg.result["username"]
         domain = dlg.result["domain"]
         try:
-            launch.launch(node, username, domain, self._get_password(node))
+            launch.launch(node, username, domain, self._get_password(iid, node))
             label = f"{domain}\\{username}" if domain else username
             self._status_var.set(f"Connecting to {node.label} as {label}...")
         except Exception as exc:
@@ -1007,6 +1021,8 @@ class RDPTreeApp:
                                         if c.id != node.id]
 
             if isinstance(node, Server) and node.settings.has_saved_password:
+                keychain.delete_password(node.id)
+            elif isinstance(node, Group) and node.has_saved_password:
                 keychain.delete_password(node.id)
 
             self._remove_from_maps(iid)
@@ -1456,7 +1472,7 @@ class GroupDialog(_BaseDialog):
         super().__init__(parent, title)
 
     def _dialog_size(self):
-        return 420, 240
+        return 420, 290
 
     def _build(self):
         outer = ttk.Frame(self.dialog, padding=16)
@@ -1469,11 +1485,22 @@ class GroupDialog(_BaseDialog):
         self._name           = self._make_field(frame, "Group Name",       0)
         self._default_user   = self._make_field(frame, "Default Username", 1)
         self._default_domain = self._make_field(frame, "Default Domain",   2)
+        self._password       = self._make_field(frame, "Default Password", 3, show="*")
+
+        self._save_pw = tk.BooleanVar()
+        ttk.Checkbutton(frame, text="Save Password to Keychain",
+                        variable=self._save_pw).grid(
+            row=4, column=1, sticky=tk.W, pady=(2, 0))
 
         if self._group:
             self._name.set(self._group.name)
             self._default_user.set(self._group.default_username)
             self._default_domain.set(self._group.default_domain)
+            if self._group.has_saved_password:
+                pw = keychain.get_password(self._group.id)
+                if pw:
+                    self._password.set(pw)
+                    self._save_pw.set(True)
 
         self._make_buttons(outer, ok_text="Save")
 
@@ -1482,11 +1509,28 @@ class GroupDialog(_BaseDialog):
         if not name:
             messagebox.showwarning("Validation", "Group name is required.", parent=self.dialog)
             return
+        group_id = self._group.id if self._group else str(uuid.uuid4())
+        has_pw = False
+
+        # Handle password
+        pw = self._password.get()
+        if self._save_pw.get() and pw:
+            if keychain.set_password(group_id, pw):
+                has_pw = True
+            else:
+                messagebox.showwarning(
+                    "Keychain Error",
+                    "Failed to save password to Keychain.",
+                    parent=self.dialog)
+        elif not self._save_pw.get() and self._group and self._group.has_saved_password:
+            keychain.delete_password(group_id)
+
         self.result = Group(
-            id=self._group.id if self._group else str(uuid.uuid4()),
+            id=group_id,
             name=name,
             default_username=self._default_user.get().strip(),
             default_domain=self._default_domain.get().strip(),
+            has_saved_password=has_pw,
             expanded=self._group.expanded if self._group else True,
             children=self._group.children if self._group else [],
         )

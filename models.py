@@ -82,6 +82,7 @@ class Group:
     expanded: bool = True
     default_username: str = ""
     default_domain: str = ""
+    has_saved_password: bool = False
     children: List[Union["Group", Server]] = field(default_factory=list)
 
     @property
@@ -105,6 +106,7 @@ class Group:
             "expanded": self.expanded,
             "default_username": self.default_username,
             "default_domain": self.default_domain,
+            "has_saved_password": self.has_saved_password,
             "children": [child.to_dict() for child in self.children],
         }
 
@@ -122,6 +124,7 @@ class Group:
             expanded=d.get("expanded", True),
             default_username=d.get("default_username", ""),
             default_domain=d.get("default_domain", ""),
+            has_saved_password=d.get("has_saved_password", False),
             children=children,
         )
 
