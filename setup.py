@@ -9,8 +9,8 @@ OPTIONS = {
         "CFBundleName": "RDP Tree",
         "CFBundleDisplayName": "RDP Tree",
         "CFBundleIdentifier": "com.radiantglobal.rdptree",
-        "CFBundleVersion": "1.0.0",
-        "CFBundleShortVersionString": "1.0.0",
+        "CFBundleVersion": "1.4.0",
+        "CFBundleShortVersionString": "1.4.0",
         "NSHighResolutionCapable": True,
         "CFBundleDocumentTypes": [
             {
